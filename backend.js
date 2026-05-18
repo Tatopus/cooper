@@ -232,16 +232,39 @@
       }
     }
 
+    async _fetchManifestSha() {
+      try {
+        const r = await fetch(
+          this._apiUrl("manifest.json") + "?ref=" + this.conf.branch,
+          { headers: this._authHeaders() }
+        );
+        if (r.ok) return (await r.json()).sha;
+      } catch (e) {}
+      return null;
+    }
+
     async _writeManifest() {
+      // Always refetch sha right before write to dodge stale-state 409s.
+      const sha = await this._fetchManifestSha();
       const content = btoa(unescape(encodeURIComponent(
         JSON.stringify({ photos: this._manifest.photos }, null, 2)
       )));
-      const result = await this._putFile(
-        "manifest.json",
-        content,
-        this._manifestSha,
-        "update manifest"
-      );
+      let result;
+      try {
+        result = await this._putFile(
+          "manifest.json", content, sha, "update manifest"
+        );
+      } catch (e) {
+        // One retry on conflict — fetch sha again in case it just changed.
+        if (/409|does not match/i.test(e.message)) {
+          const sha2 = await this._fetchManifestSha();
+          result = await this._putFile(
+            "manifest.json", content, sha2, "update manifest"
+          );
+        } else {
+          throw e;
+        }
+      }
       this._manifestSha = result.content.sha;
     }
 
@@ -290,18 +313,17 @@
       if (idx < 0) return;
       const rec = this._manifest.photos[idx];
 
-      // 2. Delete the file (need its sha — get fresh in case cached one is stale)
+      // 2. Delete the file (always refetch sha to avoid stale 409s)
       const path = `${this.conf.dir}/${rec.filePath}`;
-      let sha = rec.sha;
-      if (!sha) {
+      let sha = null;
+      try {
         const r = await fetch(this._apiUrl(path) + "?ref=" + this.conf.branch,
                               { headers: this._authHeaders() });
         if (r.ok) sha = (await r.json()).sha;
-      }
+      } catch (e) {}
       try {
         if (sha) await this._deleteFile(path, sha, `remove ${rec.filePath}`);
       } catch (e) {
-        // File may already be gone — keep going to clean manifest
         console.warn("GitHub delete file:", e.message);
       }
 
