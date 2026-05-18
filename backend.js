@@ -314,6 +314,81 @@
       await downloadFromUrl(photo.downloadSrc, photo.name || photo.filePath);
     }
 
+    // Rebuild manifest by listing whatever's actually in the photos/ folder.
+    // Useful when the user pushed files via git/web instead of the app.
+    async sync(onProgress) {
+      if (!this.conf.token) throw new Error("Missing GitHub token");
+      const r = await fetch(
+        this._apiUrl(this.conf.dir) + "?ref=" + this.conf.branch,
+        { headers: this._authHeaders() }
+      );
+      if (!r.ok) {
+        if (r.status === 404) {
+          // Folder doesn't exist yet — nothing to sync.
+          this._manifest.photos = [];
+          await this._writeManifest();
+          return { added: 0, kept: 0, removed: 0 };
+        }
+        throw new Error(`GitHub list ${this.conf.dir} → ${r.status}`);
+      }
+      const list = await r.json();
+      const imageRe = /\.(jpe?g|png|gif|webp|heic|heif|avif)$/i;
+      const imgs = (Array.isArray(list) ? list : [])
+        .filter((f) => f.type === "file" && imageRe.test(f.name));
+
+      const existing = new Map(
+        (this._manifest.photos || []).map((p) => [p.filePath, p])
+      );
+      const seen = new Set();
+      const next = [];
+      let order = 0;
+      let added = 0, kept = 0;
+
+      // Preserve existing entries (in original order) for files that still exist.
+      for (const p of this._manifest.photos || []) {
+        const found = imgs.find((f) => f.name === p.filePath);
+        if (found) {
+          seen.add(found.name);
+          next.push({ ...p, sha: found.sha, order: order++ });
+          kept++;
+        }
+      }
+
+      // Add new files (sorted by name for stable order).
+      const newFiles = imgs
+        .filter((f) => !seen.has(f.name))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      for (let i = 0; i < newFiles.length; i++) {
+        const f = newFiles[i];
+        if (onProgress) onProgress({ done: i, total: newFiles.length, name: f.name });
+        // Read dimensions from raw URL (bypass CDN cache for freshly pushed files).
+        let dims = { w: 1000, h: 1000 };
+        try {
+          dims = await readImageDims(
+            this._rawUrl(`${this.conf.dir}/${f.name}`) + "?t=" + Date.now()
+          );
+        } catch (e) { /* fall through with defaults */ }
+        next.push({
+          id: uid(),
+          name: f.name,
+          filePath: f.name,
+          w: dims.w,
+          h: dims.h,
+          addedAt: Date.now() + i,
+          order: order++,
+          sha: f.sha,
+        });
+        added++;
+      }
+      if (onProgress) onProgress({ done: newFiles.length, total: newFiles.length, name: "" });
+
+      const removed = (this._manifest.photos || []).length - kept;
+      this._manifest.photos = next;
+      await this._writeManifest();
+      return { added, kept, removed };
+    }
+
     async test() {
       // Quick health check: try to fetch the repo metadata.
       const r = await fetch(`https://api.github.com/repos/${this.conf.repo}`,

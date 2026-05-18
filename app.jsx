@@ -35,7 +35,7 @@ function useColumnsResponsive(targetCols) {
   return cols;
 }
 
-function Header({ owner, count, backendName, onOpenSettings }) {
+function Header({ owner, count, backendName, onOpenSettings, onSync, syncing }) {
   return (
     <header className="header">
       <div className="title-block">
@@ -53,6 +53,15 @@ function Header({ owner, count, backendName, onOpenSettings }) {
           <span className="indicator" />
           {owner ? "Owner" : "Viewer"}
         </span>
+        {owner && onSync && (
+          <button className="icon-btn" title="從 photos/ 資料夾掃描照片" onClick={onSync} aria-label="同步" disabled={syncing}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: syncing ? "spin 1.2s linear infinite" : "none" }}>
+              <polyline points="23 4 23 10 17 10" />
+              <polyline points="1 20 1 14 7 14" />
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+            </svg>
+          </button>
+        )}
         {owner && (
           <button className="icon-btn" title="連線設定" onClick={onOpenSettings} aria-label="連線設定">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -236,6 +245,7 @@ function App() {
   const [dragOver, setDragOver] = useState(false);
   const [toast, setToast] = useState(null);
   const [uploadProg, setUploadProg] = useState({ done: 0, total: 0 });
+  const [syncing, setSyncing] = useState(false);
   const toastTimer = useRef(null);
   const backendRef = useRef(null);
 
@@ -375,6 +385,37 @@ function App() {
     }
   }, [showToast]);
 
+  // ----- Sync from folder (GitHub only) -----
+  const sync = useCallback(async () => {
+    const backend = backendRef.current;
+    if (!backend || backend.name !== "github") return;
+    if (!AlbumBackend.configIsWritable(config, "github")) {
+      showToast("請先填 GitHub Token", "error");
+      setShowSetup(true);
+      return;
+    }
+    setSyncing(true);
+    try {
+      const result = await backend.sync(({ done, total }) => {
+        setUploadProg({ done, total });
+      });
+      setUploadProg({ done: 0, total: 0 });
+      const list = await backend.list();
+      setPhotos(list);
+      const parts = [];
+      if (result.added) parts.push(`新增 ${result.added}`);
+      if (result.kept)  parts.push(`保留 ${result.kept}`);
+      if (result.removed) parts.push(`移除 ${result.removed}`);
+      showToast(parts.length ? "已同步 · " + parts.join("，") : "沒有變動");
+    } catch (e) {
+      console.error(e);
+      showToast("同步失敗：" + (e.message || e), "error");
+      setUploadProg({ done: 0, total: 0 });
+    } finally {
+      setSyncing(false);
+    }
+  }, [config, showToast]);
+
   // ----- Drag & drop -----
   useEffect(() => {
     if (!owner) return;
@@ -454,6 +495,8 @@ function App() {
           count={photos.length}
           backendName={activeBackend}
           onOpenSettings={() => setShowSetup(true)}
+          onSync={activeBackend === "github" ? sync : null}
+          syncing={syncing}
         />
         {body}
         <footer className="footer">
